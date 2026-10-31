@@ -17,12 +17,18 @@ def run(workspace, lm_factory, *extra):
     return main([
         "--prompts-dir", str(workspace / "prompts"),
         "--registry-dir", str(workspace / "registry"),
+        "--reports-dir", str(workspace / "out" / "reports"),
+        "--summary-file", str(workspace / "out" / "summary.md"),
         *extra,
     ], lm_factory=lm_factory)
 
 
 def registry(workspace) -> Registry:
     return Registry(workspace / "registry")
+
+
+def run_report(workspace) -> dict:
+    return json.loads((workspace / "out/reports/support-agent.json").read_text(encoding="utf-8"))
 
 
 def good_prompt(workspace) -> str:
@@ -54,15 +60,26 @@ def test_gepa_refines_and_first_version_is_approved(workspace, lm_factory):
     }
 
 
-def test_rejected_candidate_is_recorded_but_not_approved(workspace, lm_factory):
+def test_rejected_candidate_leaves_registry_untouched_but_keeps_report(workspace, lm_factory):
     edit_prompt_yaml(workspace, refine=REFINE_OFF)  # Unrefined, it issues large refunds.
     assert run(workspace, lm_factory) == EXIT_REJECTED
 
-    reg = registry(workspace)
-    assert reg.approved("support-agent") is None
-    assert reg.entry("support-agent")["approved_version"] is None
-    assert reg.entry("support-agent")["history"][0]["status"] == "rejected"
-    assert (workspace / "registry/support-agent/versions/v1.yaml").is_file()
+    assert not (workspace / "registry").exists()
+    report = run_report(workspace)
+    assert report["status"] == "rejected"
+    assert report["version"] is None
+    summary = (workspace / "out/summary.md").read_text(encoding="utf-8")
+    assert "support-agent: rejected" in summary
+
+
+def test_rejected_candidate_is_evaluated_again_and_uses_no_version_number(workspace, lm_factory):
+    edit_prompt_yaml(workspace, refine=REFINE_OFF)
+    assert run(workspace, lm_factory) == EXIT_REJECTED
+    assert run(workspace, lm_factory) == EXIT_REJECTED
+
+    edit_prompt_yaml(workspace, prompt=good_prompt(workspace))
+    assert run(workspace, lm_factory) == EXIT_OK
+    assert registry(workspace).approved("support-agent")["version"] == 1
 
 
 def test_unchanged_submission_is_skipped_without_model_calls(workspace, lm_factory, engine):
@@ -94,9 +111,9 @@ def test_regression_against_approved_keeps_previous_version(workspace, lm_factor
     reg = registry(workspace)
     assert reg.approved("support-agent")["version"] == 1
     assert reg.entry("support-agent")["approved_version"] == 1
-    assert [h["status"] for h in reg.entry("support-agent")["history"]] == ["approved", "rejected"]
+    assert [h["version"] for h in reg.entry("support-agent")["history"]] == [1]
 
-    report = json.loads((workspace / "registry/support-agent/reports/v2.json").read_text(encoding="utf-8"))
+    report = run_report(workspace)
     failed = {check["name"] for check in report["checks"] if not check["passed"]}
     assert failed == {"no_regression"}
     assert "test-large-refund" in report["comparison"]["newly_failing"]
@@ -124,7 +141,7 @@ def test_refiner_dropping_placeholder_is_rejected(workspace):
     engine = Forgetful()
     factory = lambda model: dspy.LM(model, engine=engine, cache=False, num_retries=0)
     assert run(workspace, factory) == EXIT_REJECTED
-    report = json.loads((workspace / "registry/support-agent/reports/v1.json").read_text(encoding="utf-8"))
+    report = run_report(workspace)
     assert {c["name"] for c in report["checks"] if not c["passed"]} == {"preserve_placeholders"}
 
 

@@ -61,7 +61,20 @@ def process_prompt(
 
     checks = run_gate(spec.checks, candidate, baseline, candidate_prompt, spec.prompt)
     status = "approved" if all(check.passed for check in checks) else "rejected"
-    version = registry.next_version(spec.name)
+    # Rejected candidates get no version: the registry holds only what can reach main.
+    version = registry.next_version(spec.name) if status == "approved" else None
+
+    report = {
+        "name": spec.name,
+        "version": version,
+        "status": status,
+        "checks": [asdict(check) for check in checks],
+        "candidate": candidate.to_dict(),
+        "baseline": baseline.to_dict() if baseline else None,
+        "comparison": _compare(spec, candidate_prompt, candidate, approved, baseline),
+    }
+    if status == "rejected":
+        return Outcome(spec.name, status, None, report)
 
     record = {
         "name": spec.name,
@@ -80,15 +93,6 @@ def process_prompt(
         "created_at": context.created_at,
         "commit": context.commit,
         "submitted_by": context.actor,
-    }
-    report = {
-        "name": spec.name,
-        "version": version,
-        "status": status,
-        "checks": [asdict(check) for check in checks],
-        "candidate": candidate.to_dict(),
-        "baseline": baseline.to_dict() if baseline else None,
-        "comparison": _compare(spec, candidate_prompt, candidate, approved, baseline),
     }
     registry.record(record, report)
     return Outcome(spec.name, status, version, report)
@@ -128,7 +132,8 @@ def render_markdown(outcome: Outcome) -> str:
     if report is None:
         return f"## {outcome.name}: skipped (already evaluated)\n"
     mark = "✅" if outcome.status == "approved" else "❌"
-    lines = [f"## {mark} {outcome.name} v{outcome.version}: {outcome.status}", ""]
+    label = f"{outcome.name} v{outcome.version}" if outcome.version else outcome.name
+    lines = [f"## {mark} {label}: {outcome.status}", ""]
     lines += ["| Check | Result | Detail |", "| --- | --- | --- |"]
     for check in report["checks"]:
         lines.append(f"| {check['name']} | {'pass' if check['passed'] else 'FAIL'} | {check['detail']} |")

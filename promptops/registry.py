@@ -1,9 +1,9 @@
-"""The prompt registry: versioned files under registry/, committed back by the workflow.
+"""The prompt registry: versioned files under registry/, reaching main only through a reviewed PR.
 
 registry/
   index.json                   every prompt's approved version and full history
   <name>/approved.yaml         what applications should load
-  <name>/versions/v<N>.yaml    every evaluated candidate, approved or rejected
+  <name>/versions/v<N>.yaml    every version that passed the gate
   <name>/reports/v<N>.json     the full evaluation report for that version
 """
 
@@ -62,7 +62,7 @@ class Registry:
         return entry["history"][-1]["version"] + 1 if entry else 1
 
     def record(self, record: dict[str, Any], report: dict[str, Any]) -> None:
-        """Write a version; the approved pointer moves only when its status is 'approved'."""
+        """Write an approved version and move the approved pointer to it."""
         name, version = record["name"], record["version"]
         prompt_root = self.root / name
         (prompt_root / "versions").mkdir(parents=True, exist_ok=True)
@@ -73,14 +73,11 @@ class Registry:
         (prompt_root / "reports" / f"v{version}.json").write_text(
             json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n"
         )
-        approved = record["status"] == "approved"
-        if approved:
-            (prompt_root / "approved.yaml").write_text(text, encoding="utf-8", newline="\n")
+        (prompt_root / "approved.yaml").write_text(text, encoding="utf-8", newline="\n")
 
         index = self.index()
         entry = index["prompts"].setdefault(name, {"approved_version": None, "history": []})
-        if approved:
-            entry["approved_version"] = version
+        entry["approved_version"] = version
         entry["history"].append({
             "version": version,
             "status": record["status"],

@@ -1,4 +1,4 @@
-# Edit this file (or dataset.jsonl) and push to main to start the pipeline.
+# Edit this file (or dataset.jsonl) and push to a prompt/* branch to start the pipeline.
 name: support-agent
 description: Customer support agent for an online store.
 

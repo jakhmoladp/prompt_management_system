@@ -1,8 +1,10 @@
 name: Prompt pipeline
 
+# Evaluates prompt/* branches and proposes the result as a pull request.
+# This workflow never writes to main: a person reviews and merges every change.
 on:
   push:
-    branches: [main]
+    branches: ["prompt/**"]
     paths: ["prompts/**"]
   workflow_dispatch:
     inputs:
@@ -15,23 +17,24 @@ on:
         type: boolean
         default: false
 
-# One run at a time, so two runs can't assign the same version number.
+# A newer push to the same branch replaces the run for the older one.
 concurrency:
-  group: prompt-pipeline
-  cancel-in-progress: false
+  group: prompt-pipeline-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   evaluate:
+    if: startsWith(github.ref, 'refs/heads/prompt/')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      # A queued run must see the registry as the previous run left it, not as it was at its own push.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -40,6 +43,27 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      # Evaluate what main would contain after the merge. The registry always comes from main,
+      # so version numbers are current and a branch can't supply its own approved prompt.
+      - name: Merge main and take its registry
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git merge --no-ff --no-commit origin/main || true
+          git rm -r -q -f --ignore-unmatch registry
+          if git cat-file -e origin/main:registry 2>/dev/null; then
+            git checkout origin/main -- registry
+          fi
+          if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+            echo "This branch conflicts with main. Merge main into it and push again:" >&2
+            git diff --name-only --diff-filter=U >&2
+            exit 1
+          fi
+          if [ -f "$(git rev-parse --git-path MERGE_HEAD)" ] || ! git diff --cached --quiet; then
+            git commit -q -m "Merge main and take its registry"
+          fi
 
       - name: Refine, evaluate and gate
         id: pipeline
@@ -51,36 +75,46 @@ jobs:
           INPUT_PROMPT: ${{ inputs.prompt }}
           INPUT_FORCE: ${{ inputs.force }}
         run: |
-          args=()
+          args=(--reports-dir out/reports --summary-file out/summary.md)
           if [ -n "$INPUT_PROMPT" ]; then args+=(--prompt "$INPUT_PROMPT"); fi
           if [ "$INPUT_FORCE" = "true" ]; then args+=(--force); fi
           python -m promptops "${args[@]}"
 
-      # Runs for rejections too: rejected candidates stay in the registry as an audit trail.
-      - name: Commit registry
-        env:
-          BRANCH: ${{ github.ref_name }}
-        run: |
-          if [ ! -d registry ]; then
-            echo "Registry not created yet."
-            exit 0
-          fi
-          git add registry
-          if git diff --cached --quiet; then
-            echo "Registry unchanged."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "registry: update prompt versions [skip ci]"
-          for attempt in 1 2 3; do
-            git pull --rebase origin "$BRANCH" && git push origin "HEAD:$BRANCH" && exit 0
-            sleep $((attempt * 5))
-          done
-          echo "Could not push the registry update." >&2
-          exit 1
+      - name: Keep evaluation reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-reports
+          path: out/
+          if-no-files-found: ignore
 
-      # Fails the run when a candidate was rejected or the pipeline errored.
+      # The pull request is the only way out of this workflow. Its branch always holds exactly
+      # what passed the gate; it never merges itself and any failure withdraws it.
+      - name: Propose or withdraw pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_BRANCH: ${{ github.ref_name }}
+          PIPELINE_OUTCOME: ${{ steps.pipeline.outcome }}
+        run: |
+          candidate="candidate/${SOURCE_BRANCH#prompt/}"
+          if [ -d registry ]; then git add registry; fi
+          if [ "$PIPELINE_OUTCOME" != "success" ] || git diff --cached --quiet; then
+            if git ls-remote --exit-code --heads origin "$candidate" >/dev/null; then
+              git push origin --delete "$candidate"
+              echo "Withdrew $candidate and its pull request."
+            fi
+            exit 0
+          fi
+          git commit -q -m "registry: propose prompt versions from $SOURCE_BRANCH"
+          git push --force origin "HEAD:refs/heads/$candidate"
+          head -c 60000 out/summary.md > out/pr_body.md
+          if [ "$(gh pr view "$candidate" --json state --jq .state 2>/dev/null)" = "OPEN" ]; then
+            gh pr edit "$candidate" --body-file out/pr_body.md
+          else
+            gh pr create --base main --head "$candidate" \
+              --title "Approve prompts from $SOURCE_BRANCH" --body-file out/pr_body.md
+          fi
+
       - name: Report result
         if: steps.pipeline.outcome == 'failure'
         run: |
