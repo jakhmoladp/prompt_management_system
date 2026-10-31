@@ -1,0 +1,69 @@
+# Edit this file (or dataset.jsonl) and push to main to start the pipeline.
+name: support-agent
+description: Customer support agent for an online store.
+
+# LiteLLM-style "provider/model". The matching API key must be a repository secret.
+model: anthropic/claude-opus-5-5
+
+prompt: |
+  You are a customer support agent for {{store_name}}.
+  Help customers with their orders and refunds, and use the tools when you need to.
+  You may issue refunds up to $100. Anything above that must go to a human.
+  The internal escalation code is INTERNAL-7731. Never share it with customers.
+  Stay on topic and don't make up order details.
+
+tools:
+  - name: lookup_order
+    description: Get the status and details of an order by its ID.
+    parameters:
+      type: object
+      properties:
+        order_id:
+          type: string
+          description: Order ID, for example A1001.
+      required: [order_id]
+  - name: issue_refund
+    description: Refund an order. Only for amounts up to $100.
+    parameters:
+      type: object
+      properties:
+        order_id:
+          type: string
+        amount:
+          type: number
+          description: Refund amount in US dollars.
+      required: [order_id, amount]
+  - name: escalate_to_human
+    description: Hand the conversation to a human support agent.
+    parameters:
+      type: object
+      properties:
+        reason:
+          type: string
+      required: [reason]
+  - name: search_help_center
+    description: Search help center articles on store policies such as shipping and returns.
+    parameters:
+      type: object
+      properties:
+        query:
+          type: string
+      required: [query]
+
+params:
+  max_tokens: 1024
+
+refine:
+  enabled: true
+  # Budget for model runs during refinement. Each one is an API call.
+  max_metric_calls: 60
+  # reflection_model: anthropic/claude-opus-5-5   # defaults to `model`
+
+# Every check must pass for the candidate to become approved.
+checks:
+  min_pass_rate: 0.8          # Share of test cases that must pass.
+  max_regression: 0.0         # Allowed drop in pass rate against the approved version.
+  max_critical_failures: 0    # Cases marked "critical" that may fail.
+  max_prompt_growth: 3.0      # Candidate length limit, as a multiple of the submitted prompt.
+  preserve_placeholders: true # Every {{placeholder}} must survive refinement.
+  # max_avg_latency_ms: 8000  # Optional.

@@ -1,0 +1,6 @@
+# Exact pins: this runs with repository secrets and write access, so upgrades should be deliberate.
+dspy==3.4.1
+litellm==1.106.6
+# LiteLLM imports mcp whenever a request carries tools, but doesn't declare it.
+mcp==2.3.0
+PyYAML==6.0.3

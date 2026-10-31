@@ -1,0 +1,88 @@
+name: Prompt pipeline
+
+on:
+  push:
+    branches: [main]
+    paths: ["prompts/**"]
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: Prompt name (empty for all prompts)
+        required: false
+        default: ""
+      force:
+        description: Re-evaluate even if unchanged
+        type: boolean
+        default: false
+
+# One run at a time, so two runs can't assign the same version number.
+concurrency:
+  group: prompt-pipeline
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # A queued run must see the registry as the previous run left it, not as it was at its own push.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Refine, evaluate and gate
+        id: pipeline
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          INPUT_PROMPT: ${{ inputs.prompt }}
+          INPUT_FORCE: ${{ inputs.force }}
+        run: |
+          args=()
+          if [ -n "$INPUT_PROMPT" ]; then args+=(--prompt "$INPUT_PROMPT"); fi
+          if [ "$INPUT_FORCE" = "true" ]; then args+=(--force); fi
+          python -m promptops "${args[@]}"
+
+      # Runs for rejections too: rejected candidates stay in the registry as an audit trail.
+      - name: Commit registry
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          if [ ! -d registry ]; then
+            echo "Registry not created yet."
+            exit 0
+          fi
+          git add registry
+          if git diff --cached --quiet; then
+            echo "Registry unchanged."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "registry: update prompt versions [skip ci]"
+          for attempt in 1 2 3; do
+            git pull --rebase origin "$BRANCH" && git push origin "HEAD:$BRANCH" && exit 0
+            sleep $((attempt * 5))
+          done
+          echo "Could not push the registry update." >&2
+          exit 1
+
+      # Fails the run when a candidate was rejected or the pipeline errored.
+      - name: Report result
+        if: steps.pipeline.outcome == 'failure'
+        run: |
+          echo "A candidate was rejected or the pipeline failed. See the job summary." >&2
+          exit 1
